@@ -4,7 +4,7 @@ import json
 import os
 from typing import Any, Dict, List, Optional
 from urllib.request import Request, urlopen
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 
 class OrchestratorClient:
@@ -26,8 +26,8 @@ class OrchestratorClient:
             with urlopen(req) as resp:
                 return json.loads(resp.read().decode())
         except HTTPError as e:
-            return {"error": e.code, "message": e.reason, "method": method, "path": path}
-        except Exception as e:
+            return {"error": e.code, "message": e.reason, "context": {"method": method, "path": path}}
+        except URLError as e:
             raise RuntimeError(f"SDK transport error [{method} {path}]: {str(e)}") from e
 
 
