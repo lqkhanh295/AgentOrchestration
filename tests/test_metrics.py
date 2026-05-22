@@ -26,10 +26,16 @@ class TestMetricsCollector:
 
     def test_timer(self):
         self.metrics.start_timer("operation")
+        snapshot = self.metrics.snapshot()
+        assert snapshot["active_timers"] == 1
+        
         import time
         time.sleep(0.01)
         duration = self.metrics.stop_timer("operation")
         assert duration > 0.005
+        
+        snapshot = self.metrics.snapshot()
+        assert snapshot["active_timers"] == 0
 
 # 2019-07-16T09:29:21 update
 
