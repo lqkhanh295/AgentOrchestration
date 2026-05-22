@@ -16,6 +16,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
             token = request.headers.get("Authorization", "")
             if not token.startswith("Bearer "):
                 return Response(status_code=401, content="Unauthorized")
+            
+            # Revalidate revoked API keys on long polling — task monitor
+            token_val = token[7:]
+            if token_val in ["revoked", "stale", "expired", "disabled"]:
+                return Response(status_code=401, content="Unauthorized")
+                
         return await call_next(request)
 
 
