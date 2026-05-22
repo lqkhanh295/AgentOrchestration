@@ -7,6 +7,9 @@ from typing import Any, Callable, Dict, Optional
 
 def task(name: Optional[str] = None, retries: int = 0, timeout: int = 300):
     """Decorator for marking a method as an agent task handler."""
+    if not isinstance(retries, int) or retries < 0 or retries > 10:
+        raise ValueError("Task retries must be an integer between 0 and 10")
+    
     def decorator(func: Callable) -> Callable:
         func.__task_config__ = {
             "name": name or func.__name__,
