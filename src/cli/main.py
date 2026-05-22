@@ -2,10 +2,17 @@
 
 import argparse
 import sys
+import re
 
 from src.common.config import Config
 from src.common.logging import configure_logging
 
+
+def validate_agent_id(agent_id: str) -> bool:
+    if not agent_id or not re.match(r"^[a-zA-Z0-9_-]+$", agent_id):
+        print(f"Error: Invalid agent ID format: {agent_id}", file=sys.stderr)
+        sys.exit(1)
+    return True
 
 def cli():
     parser = argparse.ArgumentParser(description="Agent Orchestrator CLI")
@@ -41,6 +48,7 @@ def cli():
     elif args.command == "status":
         print("Checking agent status...")
     elif args.command == "logs":
+        validate_agent_id(args.agent_id)
         print(f"Fetching logs for agent: {args.agent_id}")
     else:
         parser.print_help()
