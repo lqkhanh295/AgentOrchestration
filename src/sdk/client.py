@@ -26,7 +26,10 @@ class OrchestratorClient:
             with urlopen(req) as resp:
                 return json.loads(resp.read().decode())
         except HTTPError as e:
-            return {"error": e.code, "message": e.reason}
+            return {"error": e.code, "message": e.reason, "method": method, "path": path}
+        except Exception as e:
+            raise RuntimeError(f"SDK transport error [{method} {path}]: {str(e)}") from e
+
 
     def register_agent(self, name: str, agent_type: str, config: Dict = None) -> Dict:
         return self._request("POST", "/agents", {
