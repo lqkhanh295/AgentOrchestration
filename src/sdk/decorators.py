@@ -17,8 +17,13 @@ def task(name: Optional[str] = None, retries: int = 0, timeout: int = 300):
         @functools.wraps(func)
         async def wrapper(*args, **kwargs):
             try:
+                if asyncio.iscoroutinefunction(func):
+                    coro = func(*args, **kwargs)
+                else:
+                    coro = asyncio.to_thread(func, *args, **kwargs)
+
                 result = await asyncio.wait_for(
-                    func(*args, **kwargs),
+                    coro,
                     timeout=timeout,
                 )
                 return result
