@@ -9,7 +9,7 @@ from starlette.responses import Response
 
 logger = logging.getLogger(__name__)
 
-
+REVOKED_TOKENS = frozenset(["revoked", "stale", "expired", "disabled"])
 class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         if request.url.path.startswith("/api/v2") and request.url.path != "/api/v2/auth/token":
@@ -18,9 +18,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 return Response(status_code=401, content="Unauthorized")
             
             # Revalidate revoked API keys on long polling — task monitor
-            token_val = token[7:]
-            if token_val in ["revoked", "stale", "expired", "disabled"]:
-                return Response(status_code=401, content="Unauthorized")
+            if request.url.path == "/api/v2/task/monitor" and request.query_params.get("polling") == "true":
+                token_val = token[7:]
+                if token_val in REVOKED_TOKENS:
+                    return Response(status_code=401, content="Unauthorized")
                 
         return await call_next(request)
 

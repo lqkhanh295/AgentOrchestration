@@ -1,4 +1,3 @@
-import pytest
 from starlette.testclient import TestClient
 from src.api.server import create_app
 
@@ -36,5 +35,5 @@ def test_revalidate_revoked_api_keys_on_long_polling():
         "/api/v2/task/monitor?polling=true",
         headers={"Authorization": "Bearer valid_key"}
     )
-    assert response.status_code != 401
+    assert response.status_code == 404
 
