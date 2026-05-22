@@ -16,7 +16,7 @@ class ResourceLimits:
 
 class AgentSandbox:
     def __init__(self, base_path: Optional[str] = None):
-        self.base_path = Path(base_path or tempfile.mkdtemp(prefix="ao_sandbox_"))
+        self.base_path = Path(base_path or tempfile.mkdtemp(prefix="ao_sandbox_")).resolve()
         self._sandboxes: Dict[str, Path] = {}
 
     def create(self, agent_id: str, limits: Optional[ResourceLimits] = None) -> Path:
