@@ -7,6 +7,16 @@ from src.common.config import Config
 from src.common.logging import configure_logging
 
 
+def non_negative_int(value):
+    try:
+        ivalue = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{value} is not a valid integer")
+    if ivalue < 0:
+        raise argparse.ArgumentTypeError(f"{value} must be a non-negative integer")
+    return ivalue
+
+
 def cli():
     parser = argparse.ArgumentParser(description="Agent Orchestrator CLI")
     parser.add_argument("--config", "-c", help="Path to config file")
@@ -25,7 +35,7 @@ def cli():
 
     logs_parser = subparsers.add_parser("logs", help="View agent logs")
     logs_parser.add_argument("agent_id", help="Agent ID")
-    logs_parser.add_argument("--tail", "-t", type=int, default=50, help="Number of lines")
+    logs_parser.add_argument("--tail", "-t", type=non_negative_int, default=50, help="Number of lines")
 
     args = parser.parse_args()
 

@@ -23,6 +23,8 @@ class MetricsCollector:
             self._gauges[metric] = value
 
     def observe(self, metric: str, value: float) -> None:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError("Value must be a numeric type (int or float) and not boolean")
         with self._lock:
             self._histograms[metric].append(value)
 
@@ -49,10 +51,14 @@ class MetricsCollector:
             count = len(v)
             total = sum(v)
             avg = total / count if count else 0
+            minimum = min(v) if count else 0.0
+            maximum = max(v) if count else 0.0
             histograms_formatted[k] = {
                 "count": count,
                 "sum": total,
-                "avg": avg
+                "avg": avg,
+                "min": minimum,
+                "max": maximum
             }
 
         return {

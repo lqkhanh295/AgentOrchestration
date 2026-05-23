@@ -17,3 +17,19 @@ def test_cli_config_relative_path_expansion():
         args = cli()
         expected_path = str(Path("relative/config.json").resolve())
         assert args.config == expected_path
+
+
+import pytest
+
+def test_cli_negative_tail_rejected():
+    test_args = ["ao", "logs", "agent_123", "--tail", "-5"]
+    with patch.object(sys, "argv", test_args):
+        with pytest.raises(SystemExit):
+            cli()
+
+
+def test_cli_valid_tail_accepted():
+    test_args = ["ao", "logs", "agent_123", "--tail", "15"]
+    with patch.object(sys, "argv", test_args):
+        args = cli()
+        assert args.tail == 15

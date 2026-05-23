@@ -23,6 +23,36 @@ class TestMetricsCollector:
         snapshot = self.metrics.snapshot()
         assert snapshot["histograms"]["response.time"]["count"] == 2
         assert snapshot["histograms"]["response.time"]["avg"] == 1.0
+        assert snapshot["histograms"]["response.time"]["min"] == 0.5
+        assert snapshot["histograms"]["response.time"]["max"] == 1.5
+
+    def test_observe_validation(self):
+        with pytest.raises(TypeError):
+            self.metrics.observe("response.time", "invalid")
+        with pytest.raises(TypeError):
+            self.metrics.observe("response.time", None)
+        with pytest.raises(TypeError):
+            self.metrics.observe("response.time", True)
+        with pytest.raises(TypeError):
+            self.metrics.observe("response.time", False)
+
+    def test_histogram_snapshot_min_max(self):
+        self.metrics.observe("response.time", 0.5)
+        self.metrics.observe("response.time", 1.5)
+        self.metrics.observe("response.time", 0.2)
+        snapshot = self.metrics.snapshot()
+        assert snapshot["histograms"]["response.time"]["count"] == 3
+        assert snapshot["histograms"]["response.time"]["avg"] == pytest.approx(2.2 / 3)
+        assert snapshot["histograms"]["response.time"]["min"] == 0.2
+        assert snapshot["histograms"]["response.time"]["max"] == 1.5
+
+    def test_histogram_snapshot_empty_list(self):
+        self.metrics._histograms["empty_hist"]
+        snapshot = self.metrics.snapshot()
+        assert snapshot["histograms"]["empty_hist"]["count"] == 0
+        assert snapshot["histograms"]["empty_hist"]["avg"] == 0
+        assert snapshot["histograms"]["empty_hist"]["min"] == 0.0
+        assert snapshot["histograms"]["empty_hist"]["max"] == 0.0
 
     def test_timer(self):
         self.metrics.start_timer("operation")
