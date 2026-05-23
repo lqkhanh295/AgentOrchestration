@@ -32,6 +32,21 @@ class TestConfig:
         assert data["key1"] == "value1"
         assert data["key2"] == "value2"
 
+    def test_to_redacted_dict(self):
+        config = Config()
+        config.set("app_name", "public_value")
+        config.set("api_key", "super_secret_token")
+        config.set("db.password", "admin123")
+        config.set("auth_token", "jwt_token")
+        config.set("credentials", {"user": "admin", "secret_pass": "123"})
+        
+        redacted = config.to_redacted_dict()
+        assert redacted["app_name"] == "public_value"
+        assert redacted["api_key"] == "********"
+        assert redacted["db"]["password"] == "********"
+        assert redacted["auth_token"] == "********"
+        assert redacted["credentials"] == "********"
+
 # 2019-02-01T18:58:35 update
 
 # 2019-07-31T13:45:15 update

@@ -29,6 +29,10 @@ def cli():
 
     args = parser.parse_args()
 
+    if args.config:
+        from pathlib import Path
+        args.config = str(Path(args.config).expanduser().resolve())
+
     if args.verbose:
         configure_logging("DEBUG")
     else:
@@ -45,6 +49,8 @@ def cli():
     else:
         parser.print_help()
         sys.exit(1)
+
+    return args
 
 
 if __name__ == "__main__":

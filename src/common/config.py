@@ -50,6 +50,21 @@ class Config:
     def to_dict(self) -> Dict:
         return self._data
 
+    def to_redacted_dict(self) -> Dict:
+        def redact(data: Any) -> Any:
+            if isinstance(data, dict):
+                redacted = {}
+                for k, v in data.items():
+                    if any(word in k.lower() for word in ["key", "secret", "token", "password", "auth", "credential"]):
+                        redacted[k] = "********"
+                    else:
+                        redacted[k] = redact(v)
+                return redacted
+            elif isinstance(data, list):
+                return [redact(item) for item in data]
+            return data
+        return redact(self._data)
+
 # 2019-03-14T15:29:32 update
 
 # 2019-05-06T15:01:41 update

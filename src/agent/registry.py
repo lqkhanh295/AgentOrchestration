@@ -23,6 +23,10 @@ class AgentRegistry:
         self._index: Dict[str, List[str]] = {}
 
     def register(self, name: str, agent_type: str, config: Optional[Dict] = None) -> str:
+        for field, val in [("name", name), ("agent_type", agent_type)]:
+            if ".." in val or "/" in val or "\\" in val:
+                raise ValueError(f"Invalid {field} containing path traversal sequences")
+
         agent_id = str(uuid.uuid4())
         timestamp = time.time()
         self._agents[agent_id] = {

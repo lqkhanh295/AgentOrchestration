@@ -48,6 +48,12 @@ class TestAgentRegistry:
     def test_delete_nonexistent_agent(self):
         assert not self.registry.delete("nonexistent-id")
 
+    def test_register_path_traversal_prevention(self):
+        with pytest.raises(ValueError):
+            self.registry.register("../malicious", "worker.processor")
+        with pytest.raises(ValueError):
+            self.registry.register("test-agent", "worker/../../processor")
+
 # 2019-01-23T10:28:57 update
 
 # 2019-01-28T18:15:57 update

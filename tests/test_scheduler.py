@@ -36,6 +36,22 @@ class TestTaskScheduler:
         task = asyncio.run(self.scheduler.dequeue())
         assert self.scheduler.fail(task["id"])
 
+    def test_monotonic_time_scheduling(self):
+        import time
+        import asyncio
+        # Schedule a task with 0.05s delay
+        task_id = self.scheduler.schedule({"type": "delayed"}, 0.05)
+        
+        # Dequeue immediately should return None since 0.05s has not elapsed
+        task = asyncio.run(self.scheduler.dequeue())
+        assert task is None
+        
+        # Sleep for 0.06s and dequeue should return the task
+        time.sleep(0.06)
+        task = asyncio.run(self.scheduler.dequeue())
+        assert task is not None
+        assert task["id"] == task_id
+
 # 2019-01-09T19:07:03 update
 
 # 2019-02-18T12:30:02 update
