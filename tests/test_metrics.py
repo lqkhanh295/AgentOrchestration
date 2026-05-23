@@ -31,6 +31,16 @@ class TestMetricsCollector:
         duration = self.metrics.stop_timer("operation")
         assert duration > 0.005
 
+    def test_reset(self):
+        self.metrics.increment("requests", 5)
+        self.metrics.gauge("temp", 22.0)
+        self.metrics.observe("latency", 0.1)
+        self.metrics.reset()
+        snapshot = self.metrics.snapshot()
+        assert snapshot["counters"] == {}
+        assert snapshot["gauges"] == {}
+        assert snapshot["histograms"] == {}
+
 # 2019-07-16T09:29:21 update
 
 # 2019-09-09T13:35:42 update

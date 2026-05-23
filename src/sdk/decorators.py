@@ -8,11 +8,12 @@ from typing import Any, Callable, Dict, Optional
 def task(name: Optional[str] = None, retries: int = 0, timeout: int = 300):
     """Decorator for marking a method as an agent task handler."""
     def decorator(func: Callable) -> Callable:
-        func.__task_config__ = {
+        config = {
             "name": name or func.__name__,
             "retries": retries,
             "timeout": timeout,
         }
+        func.__task_config__ = config
 
         @functools.wraps(func)
         async def wrapper(*args, **kwargs):
@@ -25,6 +26,7 @@ def task(name: Optional[str] = None, retries: int = 0, timeout: int = 300):
             except asyncio.TimeoutError:
                 raise TimeoutError(f"Task {name or func.__name__} timed out after {timeout}s")
 
+        wrapper.__task_config__ = config
         return wrapper
     return decorator
 
@@ -50,6 +52,7 @@ def on_event(event_type: str):
         async def wrapper(*args, **kwargs):
             return await func(*args, **kwargs)
 
+        wrapper.__event_handler__ = event_type
         return wrapper
     return decorator
 

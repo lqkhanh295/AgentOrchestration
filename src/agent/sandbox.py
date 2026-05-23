@@ -20,7 +20,18 @@ class AgentSandbox:
         self._sandboxes: Dict[str, Path] = {}
 
     def create(self, agent_id: str, limits: Optional[ResourceLimits] = None) -> Path:
+        if ".." in agent_id or "/" in agent_id or "\\" in agent_id:
+            raise ValueError("Invalid agent_id with path traversal characters")
+
         sandbox_path = self.base_path / agent_id
+        
+        try:
+            resolved_base = self.base_path.resolve()
+            resolved_path = sandbox_path.resolve()
+            resolved_path.relative_to(resolved_base)
+        except ValueError:
+            raise ValueError("Sandbox path is outside base path")
+
         sandbox_path.mkdir(parents=True, exist_ok=True)
         self._sandboxes[agent_id] = sandbox_path
         return sandbox_path
@@ -34,9 +45,26 @@ class AgentSandbox:
         return False
 
     def get_path(self, agent_id: str) -> Optional[Path]:
-        return self._sandboxes.get(agent_id)
+        path = self._sandboxes.get(agent_id)
+        if not path:
+            return None
+        if not path.exists():
+            return None
+        try:
+            resolved_base = self.base_path.resolve()
+            resolved_path = path.resolve()
+            resolved_path.relative_to(resolved_base)
+        except ValueError:
+            return None
+        return path
 
     def apply_limits(self, agent_id: str, limits: ResourceLimits) -> None:
+        if limits.disk_mb is not None and limits.disk_mb > 0:
+            try:
+                disk_bytes = limits.disk_mb * 1024 * 1024
+                resource.setrlimit(resource.RLIMIT_FSIZE, (disk_bytes, disk_bytes))
+            except (ValueError, AttributeError, resource.error) as e:
+                raise ValueError(f"Enforcing disk_mb limit is not supported on this platform: {e}")
         try:
             resource.setrlimit(resource.RLIMIT_CPU, (limits.cpu_time, limits.cpu_time))
             mem_bytes = limits.memory_mb * 1024 * 1024
