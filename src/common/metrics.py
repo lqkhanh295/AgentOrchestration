@@ -40,12 +40,26 @@ class MetricsCollector:
 
     def snapshot(self) -> Dict:
         with self._lock:
-            return {
-                "counters": dict(self._counters),
-                "gauges": dict(self._gauges),
-                "histograms": {k: {"count": len(v), "sum": sum(v), "avg": sum(v) / len(v) if v else 0}
-                               for k, v in self._histograms.items()},
+            counters_copy = dict(self._counters)
+            gauges_copy = dict(self._gauges)
+            histograms_copy = {k: list(v) for k, v in self._histograms.items()}
+
+        histograms_formatted = {}
+        for k, v in histograms_copy.items():
+            count = len(v)
+            total = sum(v)
+            avg = total / count if count else 0
+            histograms_formatted[k] = {
+                "count": count,
+                "sum": total,
+                "avg": avg
             }
+
+        return {
+            "counters": counters_copy,
+            "gauges": gauges_copy,
+            "histograms": histograms_formatted,
+        }
 
     def reset(self) -> None:
         with self._lock:

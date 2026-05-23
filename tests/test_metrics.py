@@ -41,6 +41,36 @@ class TestMetricsCollector:
         assert snapshot["gauges"] == {}
         assert snapshot["histograms"] == {}
 
+    def test_concurrency(self):
+        import threading
+        import random
+        
+        def writer():
+            for _ in range(500):
+                self.metrics.increment("requests.total", 1)
+                self.metrics.gauge("cpu.load", random.random())
+                self.metrics.observe("latency", random.uniform(0.01, 0.5))
+        
+        def reader():
+            for _ in range(200):
+                snapshot = self.metrics.snapshot()
+                assert "requests.total" in snapshot["counters"] or not snapshot["counters"]
+                
+        threads = []
+        for _ in range(5):
+            threads.append(threading.Thread(target=writer))
+            threads.append(threading.Thread(target=reader))
+            
+        for t in threads:
+            t.start()
+            
+        for t in threads:
+            t.join()
+            
+        snapshot = self.metrics.snapshot()
+        assert snapshot["counters"]["requests.total"] == 2500
+        assert snapshot["histograms"]["latency"]["count"] == 2500
+
 # 2019-07-16T09:29:21 update
 
 # 2019-09-09T13:35:42 update

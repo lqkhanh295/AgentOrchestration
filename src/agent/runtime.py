@@ -4,6 +4,7 @@ import os
 import signal
 import subprocess
 import logging
+import time
 from enum import Enum
 from typing import Dict, Optional
 
@@ -22,6 +23,7 @@ class AgentRuntime:
     def __init__(self):
         self._processes: Dict[str, subprocess.Popen] = {}
         self._states: Dict[str, RuntimeState] = {}
+        self._start_times: Dict[str, float] = {}
 
     def start(self, agent_id: str, command: list, env: Optional[Dict] = None) -> bool:
         if agent_id in self._processes and self._processes[agent_id].poll() is None:
@@ -42,6 +44,7 @@ class AgentRuntime:
                 stderr=subprocess.PIPE,
             )
             self._processes[agent_id] = proc
+            self._start_times[agent_id] = time.monotonic()
             self._states[agent_id] = RuntimeState.RUNNING
             logger.info(f"Agent {agent_id} started (PID: {proc.pid})")
             return True
@@ -64,18 +67,42 @@ class AgentRuntime:
             proc.wait()
 
         self._states[agent_id] = RuntimeState.STOPPED
+        self._start_times.pop(agent_id, None)
         logger.info(f"Agent {agent_id} stopped")
         return True
 
     def get_state(self, agent_id: str) -> RuntimeState:
         proc = self._processes.get(agent_id)
         if proc and proc.poll() is not None:
-            self._states[agent_id] = RuntimeState.CRASHED
+            if self._states.get(agent_id) not in (RuntimeState.STOPPED, RuntimeState.STOPPING):
+                self._states[agent_id] = RuntimeState.CRASHED
         return self._states.get(agent_id, RuntimeState.STOPPED)
 
     def is_running(self, agent_id: str) -> bool:
         proc = self._processes.get(agent_id)
         return proc is not None and proc.poll() is None
+
+    def check_timeouts(self, timeout_seconds: int) -> list[str]:
+        timed_out_agents = []
+        now = time.monotonic()
+        for agent_id, proc in list(self._processes.items()):
+            if proc.poll() is None:
+                start_time = self._start_times.get(agent_id)
+                if start_time is not None and (now - start_time) > timeout_seconds:
+                    logger.warning(f"Agent {agent_id} timed out. Terminating.")
+                    self._states[agent_id] = RuntimeState.STOPPING
+                    proc.send_signal(signal.SIGTERM)
+                    try:
+                        proc.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait()
+                    self._states[agent_id] = RuntimeState.CRASHED
+                    self._start_times.pop(agent_id, None)
+                    timed_out_agents.append(agent_id)
+            else:
+                self._start_times.pop(agent_id, None)
+        return timed_out_agents
 
 # 2019-01-11T10:56:26 update
 
