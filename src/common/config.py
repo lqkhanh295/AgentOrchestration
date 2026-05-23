@@ -5,22 +5,70 @@ import json
 from typing import Any, Dict, Optional
 
 
+from src.common.errors import ConfigurationError
+
+
 class Config:
-    def __init__(self, config_path: Optional[str] = None):
+    def __init__(self, config_path: Optional[str] = None, key_map: Optional[Dict[str, str]] = None):
         self._data: Dict[str, Any] = {}
+        self._key_map = key_map or {}
         if config_path:
             self.load(config_path)
         self._load_env_overrides()
 
     def load(self, path: str) -> None:
-        with open(path) as f:
-            self._data = json.load(f)
+        try:
+            with open(path) as f:
+                self._data = json.load(f)
+        except json.JSONDecodeError as e:
+            raise ConfigurationError(
+                f"Failed to parse JSON config at {path} (line {e.lineno}, column {e.colno}): {e.msg}"
+            ) from e
+
+    def _find_matching_path(self, current_dict: Any, parts: list[str]) -> Optional[list[str]]:
+        if not parts:
+            return []
+        if not isinstance(current_dict, dict):
+            return None
+        for i in range(1, len(parts) + 1):
+            candidate_key = "_".join(parts[:i])
+            if candidate_key in current_dict:
+                if i == len(parts):
+                    return [candidate_key]
+                rest_path = self._find_matching_path(current_dict[candidate_key], parts[i:])
+                if rest_path is not None:
+                    return [candidate_key] + rest_path
+        return None
 
     def _load_env_overrides(self) -> None:
         prefix = "AO_"
         for key, value in os.environ.items():
             if key.startswith(prefix):
-                config_key = key[len(prefix):].lower().replace("_", ".")
+                env_key_no_prefix = key[len(prefix):]
+                
+                # 1. Explicit key_map
+                key_map_lower = {k.lower(): v for k, v in self._key_map.items()}
+                if env_key_no_prefix.lower() in key_map_lower:
+                    config_key = key_map_lower[env_key_no_prefix.lower()]
+                    self._set_nested(config_key, value)
+                    continue
+
+                # 2. Smart path matching against existing config
+                parts = env_key_no_prefix.lower().split("_")
+                matched_path = self._find_matching_path(self._data, parts)
+                if matched_path:
+                    config_key = ".".join(matched_path)
+                    self._set_nested(config_key, value)
+                    continue
+
+                # 3. Double underscores -> literal underscore
+                if "__" in env_key_no_prefix:
+                    config_key = env_key_no_prefix.lower().replace("__", "[TEMP]").replace("_", ".").replace("[TEMP]", "_")
+                    self._set_nested(config_key, value)
+                    continue
+
+                # 4. Fallback default behavior
+                config_key = env_key_no_prefix.lower().replace("_", ".")
                 self._set_nested(config_key, value)
 
     def _set_nested(self, key: str, value: Any) -> None:

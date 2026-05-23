@@ -24,11 +24,17 @@ class AgentRuntime:
         self._processes: Dict[str, subprocess.Popen] = {}
         self._states: Dict[str, RuntimeState] = {}
         self._start_times: Dict[str, float] = {}
+        self._heartbeats: Dict[str, float] = {}
+        self._terminal_outcomes: Dict[str, str] = {}
+        self._locks: Dict[str, bool] = {}
 
     def start(self, agent_id: str, command: list, env: Optional[Dict] = None) -> bool:
         if agent_id in self._processes and self._processes[agent_id].poll() is None:
             logger.warning(f"Agent {agent_id} is already running")
             return False
+
+        self._terminal_outcomes.pop(agent_id, None)
+        self._heartbeats.pop(agent_id, None)
 
         self._states[agent_id] = RuntimeState.STARTING
         process_env = os.environ.copy()
@@ -46,16 +52,21 @@ class AgentRuntime:
             self._processes[agent_id] = proc
             self._start_times[agent_id] = time.monotonic()
             self._states[agent_id] = RuntimeState.RUNNING
+            self._locks[agent_id] = True
+            self._heartbeats[agent_id] = time.monotonic()
             logger.info(f"Agent {agent_id} started (PID: {proc.pid})")
             return True
         except Exception as e:
             self._states[agent_id] = RuntimeState.CRASHED
+            self._terminal_outcomes[agent_id] = "crashed"
             logger.error(f"Failed to start agent {agent_id}: {e}")
             return False
 
     def stop(self, agent_id: str, timeout: int = 10) -> bool:
         proc = self._processes.get(agent_id)
         if not proc or proc.poll() is not None:
+            self._locks.pop(agent_id, None)
+            self._heartbeats.pop(agent_id, None)
             return False
 
         self._states[agent_id] = RuntimeState.STOPPING
@@ -67,15 +78,62 @@ class AgentRuntime:
             proc.wait()
 
         self._states[agent_id] = RuntimeState.STOPPED
+        self._terminal_outcomes[agent_id] = "stopped"
         self._start_times.pop(agent_id, None)
+        self._heartbeats.pop(agent_id, None)
+        self._locks.pop(agent_id, None)
         logger.info(f"Agent {agent_id} stopped")
         return True
 
+    def record_terminal_outcome(self, agent_id: str, outcome: str) -> None:
+        """Record one durable terminal outcome and release locks."""
+        if agent_id in self._terminal_outcomes:
+            return
+        self._terminal_outcomes[agent_id] = outcome
+        self._states[agent_id] = RuntimeState.STOPPED
+        self._locks.pop(agent_id, None)
+        self._start_times.pop(agent_id, None)
+        self._heartbeats.pop(agent_id, None)
+
+    def heartbeat(self, agent_id: str) -> bool:
+        """Record worker heartbeat, preventing revival of completed runs."""
+        if agent_id in self._terminal_outcomes:
+            logger.warning(f"Heartbeat rejected: agent {agent_id} has completed with outcome '{self._terminal_outcomes[agent_id]}'")
+            return False
+            
+        current_state = self.get_state(agent_id)
+        if current_state in (RuntimeState.STOPPED, RuntimeState.STOPPING, RuntimeState.CRASHED):
+            logger.warning(f"Heartbeat rejected: agent {agent_id} is in completed state {current_state}")
+            return False
+            
+        self._heartbeats[agent_id] = time.monotonic()
+        return True
+
+    def check_heartbeats(self, timeout_seconds: int) -> list[str]:
+        """Check for missing heartbeats and terminate dead workers."""
+        timed_out = []
+        now = time.monotonic()
+        for agent_id, last_hb in list(self._heartbeats.items()):
+            if self.get_state(agent_id) == RuntimeState.RUNNING:
+                if (now - last_hb) > timeout_seconds:
+                    logger.warning(f"Agent {agent_id} heartbeat timeout. Terminating.")
+                    self.stop(agent_id)
+                    self._states[agent_id] = RuntimeState.CRASHED
+                    self._terminal_outcomes[agent_id] = "heartbeat_timeout"
+                    timed_out.append(agent_id)
+        return timed_out
+
     def get_state(self, agent_id: str) -> RuntimeState:
+        if agent_id in self._terminal_outcomes:
+            return RuntimeState.STOPPED
+            
         proc = self._processes.get(agent_id)
         if proc and proc.poll() is not None:
             if self._states.get(agent_id) not in (RuntimeState.STOPPED, RuntimeState.STOPPING):
                 self._states[agent_id] = RuntimeState.CRASHED
+                self._terminal_outcomes[agent_id] = "crashed"
+                self._locks.pop(agent_id, None)
+                self._heartbeats.pop(agent_id, None)
         return self._states.get(agent_id, RuntimeState.STOPPED)
 
     def is_running(self, agent_id: str) -> bool:
