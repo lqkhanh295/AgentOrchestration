@@ -1,10 +1,46 @@
 """Structured logging configuration."""
 
+import contextvars
 import json
 import logging
 import sys
+import uuid
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Callable, Dict, Optional
+
+# ---------------------------------------------------------------------------
+# Request-scoped context variable for request IDs
+# ---------------------------------------------------------------------------
+
+#: Module-level ContextVar that stores the current request ID.
+#: Background tasks inherit this value automatically because
+#: :func:`asyncio.create_task` copies the calling task's context.
+request_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "request_id_ctx", default=""
+)
+
+
+def get_request_id() -> str:
+    """Return the current request ID, or an empty string if none is set."""
+    return request_id_ctx.get()
+
+
+def set_request_id(request_id: str) -> contextvars.Token:
+    """Set the request ID for the current context and return its reset token."""
+    return request_id_ctx.set(request_id)
+
+
+class RequestIdFilter(logging.Filter):
+    """Logging filter that injects the current request ID into every log record.
+
+    Install this on any handler or logger to ensure that background tasks
+    spawned from a request context carry the same ``request_id`` field.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:  # noqa: A003
+        rid = get_request_id()
+        record.request_id = rid  # type: ignore[attr-defined]
+        return True
 
 
 class StructuredFormatter(logging.Formatter):
@@ -15,8 +51,10 @@ class StructuredFormatter(logging.Formatter):
             "logger": record.name,
             "message": record.getMessage(),
         }
-        if hasattr(record, "request_id"):
-            log_entry["request_id"] = record.request_id
+        # Prefer the context-var ID; fall back to any manually set attribute
+        rid = get_request_id() or getattr(record, "request_id", "")
+        if rid:
+            log_entry["request_id"] = rid
         if record.exc_info and record.exc_info[0]:
             log_entry["exception"] = self.formatException(record.exc_info)
         return json.dumps(log_entry)
@@ -26,9 +64,11 @@ def configure_logging(level: str = "INFO", json_output: bool = True) -> None:
     handler = logging.StreamHandler(sys.stdout)
     if json_output:
         handler.setFormatter(StructuredFormatter())
+        handler.addFilter(RequestIdFilter())
     else:
         handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
     logging.basicConfig(level=getattr(logging, level.upper(), logging.INFO), handlers=[handler])
+
 
 # 2019-01-14T10:37:21 update
 

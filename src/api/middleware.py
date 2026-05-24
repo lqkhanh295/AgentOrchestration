@@ -1,21 +1,178 @@
 """API middleware components."""
 
+import base64
+import contextvars
+import json
+import re
 import time
+import uuid
 import logging
-from typing import Callable
+from typing import Callable, Optional
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Request-scoped context variable (issue #3601)
+# ---------------------------------------------------------------------------
+
+#: Stores the current request ID so background tasks spawned from the request
+#: context (via asyncio.create_task) automatically inherit the same value.
+_request_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "_request_id_ctx", default=""
+)
+
+
+def get_current_request_id() -> str:
+    """Return the request ID bound to the current async context."""
+    return _request_id_ctx.get()
+
+
+# Public paths that do not require authentication
+_PUBLIC_PATHS = {"/api/v2/auth/token"}
+
+
+def _normalize_path(path: str) -> str:
+    """Collapse consecutive slashes in a URL path to a single slash.
+
+    Prevents auth bypass via paths like ``//api/v2/secure`` that would not
+    match a naive ``startswith('/api/v2')`` check (issue #3537).
+    """
+    return re.sub(r"/+", "/", path)
+
+
+def _decode_jwt_payload(token: str) -> Optional[dict]:
+    """Decode JWT payload without signature verification (claims reading only)."""
+    try:
+        parts = token.split(".")
+        if len(parts) != 3:
+            return None
+        payload_b64 = parts[1] + "=" * (-len(parts[1]) % 4)
+        payload_bytes = base64.urlsafe_b64decode(payload_b64)
+        return json.loads(payload_bytes.decode("utf-8"))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _check_token_nbf(token: str) -> bool:
+    """Return True when the token's not-before (nbf) claim is satisfied.
+
+    Rejects tokens whose ``nbf`` is in the future (issue #3596).
+    """
+    payload = _decode_jwt_payload(token)
+    if payload is None:
+        return True  # Malformed token — let downstream handle it
+    nbf = payload.get("nbf")
+    if nbf is None:
+        return True  # nbf is optional per RFC 7519 §4.1.5
+    return time.time() >= float(nbf)
+
+
+# ---------------------------------------------------------------------------
+# Policy engine availability (issue #3592)
+# ---------------------------------------------------------------------------
+
+class PolicyEngineUnavailableError(RuntimeError):
+    """Raised when the policy engine cannot be contacted."""
+
+
+def check_policy_engine_available(policy_client=None) -> None:
+    """Fail closed when the policy engine is unavailable.
+
+    If *policy_client* is provided, it must expose a ``is_available()``
+    method.  When the engine cannot be reached, this function raises
+    :class:`PolicyEngineUnavailableError` so that the caller can deny
+    the request rather than silently allowing it through.
+    """
+    if policy_client is None:
+        return  # No policy engine configured — nothing to check
+    try:
+        available = policy_client.is_available()
+    except Exception as exc:
+        raise PolicyEngineUnavailableError(
+            "Policy engine check failed; denying request (fail-closed)"
+        ) from exc
+    if not available:
+        raise PolicyEngineUnavailableError(
+            "Policy engine is unavailable; denying request (fail-closed)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Middleware classes
+# ---------------------------------------------------------------------------
+
+class RequestIdMiddleware(BaseHTTPMiddleware):
+    """Assign and propagate a unique request ID to every request.
+
+    The ID is:
+    * Read from the ``X-Request-ID`` header if provided by the caller.
+    * Otherwise generated as a new UUID4.
+    * Stored in a ``contextvars.ContextVar`` so that background tasks
+      spawned with :func:`asyncio.create_task` inherit the **same** ID —
+      this ensures background task logs are correlated to the originating
+      request (issue #3601).
+    * Echoed back in the ``X-Request-ID`` response header for client-side
+      tracing.
+    """
+
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        # Honour a caller-supplied ID or mint a fresh one
+        request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+
+        # Bind to the async context so all downstream code (including
+        # background tasks) sees the same ID without passing it explicitly.
+        token = _request_id_ctx.set(request_id)
+        try:
+            response = await call_next(request)
+        finally:
+            # Always reset — prevent ID leaking to unrelated requests sharing
+            # the same thread/coroutine in error paths.
+            _request_id_ctx.reset(token)
+
+        response.headers["X-Request-ID"] = request_id
+        logger.debug("Request %s completed with status %s", request_id, response.status_code)
+        return response
+
 
 class AuthMiddleware(BaseHTTPMiddleware):
+    """Authentication middleware for the Agent Orchestrator API.
+
+    Fixes applied:
+    * **Path normalisation** (issue #3537): collapses ``//api/v2/…`` before
+      prefix checks to prevent auth bypass via duplicate slashes.
+    * **JWT nbf enforcement** (issue #3596): rejects tokens whose ``nbf``
+      claim lies in the future.
+    """
+
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        if request.url.path.startswith("/api/v2") and request.url.path != "/api/v2/auth/token":
-            token = request.headers.get("Authorization", "")
-            if not token.startswith("Bearer "):
+        normalized_path = _normalize_path(request.url.path)
+
+        if normalized_path.startswith("/api/v2") and normalized_path not in _PUBLIC_PATHS:
+            token_header = request.headers.get("Authorization", "")
+            if not token_header.startswith("Bearer "):
+                logger.warning(
+                    "Rejected unauthenticated request: method=%s path=%s",
+                    request.method,
+                    normalized_path,
+                )
                 return Response(status_code=401, content="Unauthorized")
+
+            bearer_token = token_header[len("Bearer "):]
+
+            if not _check_token_nbf(bearer_token):
+                logger.warning(
+                    "Rejected token with future nbf claim: method=%s path=%s",
+                    request.method,
+                    normalized_path,
+                )
+                return Response(
+                    status_code=401,
+                    content="Token not yet valid (nbf claim is in the future)",
+                )
+
         return await call_next(request)
 
 
@@ -47,8 +204,17 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         start = time.time()
         response = await call_next(request)
         duration = time.time() - start
-        logger.info(f"{request.method} {request.url.path} {response.status_code} {duration:.3f}s")
+        rid = get_current_request_id()
+        logger.info(
+            "%s %s %s %.3fs%s",
+            request.method,
+            request.url.path,
+            response.status_code,
+            duration,
+            f" request_id={rid}" if rid else "",
+        )
         return response
+
 
 # 2019-03-01T18:35:19 update
 
