@@ -1,4 +1,4 @@
-import pytest
+from src.common.exports import EXPORT_SCHEMA_VERSION, load_dataset_export
 from src.common.metrics import MetricsCollector
 
 
@@ -30,6 +30,32 @@ class TestMetricsCollector:
         time.sleep(0.01)
         duration = self.metrics.stop_timer("operation")
         assert duration > 0.005
+
+    def test_export_snapshot_writes_versioned_dataset(self, tmp_path):
+        self.metrics.increment("requests.total", 2)
+        self.metrics.gauge("memory.usage", 85.5)
+        self.metrics.observe("response.time", 0.5)
+
+        data_path = tmp_path / "metrics.json"
+        metadata = self.metrics.export_snapshot(
+            data_path,
+            generated_at="2026-05-24T02:23:00Z",
+        )
+        records, loaded_metadata = load_dataset_export(data_path)
+
+        assert metadata == loaded_metadata
+        assert loaded_metadata["schema_version"] == EXPORT_SCHEMA_VERSION
+        assert loaded_metadata["field_dictionary"]["metric_type"][
+            "description"
+        ] == "Metric category: counter, gauge, or histogram."
+        assert {
+            (record["metric_type"], record["name"])
+            for record in records
+        } == {
+            ("counter", "requests.total"),
+            ("gauge", "memory.usage"),
+            ("histogram", "response.time"),
+        }
 
 # 2019-07-16T09:29:21 update
 

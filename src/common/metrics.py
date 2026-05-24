@@ -2,13 +2,50 @@
 
 import time
 from collections import defaultdict
-from typing import Dict, List
-from threading import Lock
+from pathlib import Path
+from threading import RLock
+from typing import Any, Dict, List
+
+from src.common.exports import write_dataset_export
+
+
+METRIC_EXPORT_FIELDS = {
+    "metric_type": {
+        "types": ["string"],
+        "nullable": False,
+        "description": "Metric category: counter, gauge, or histogram.",
+    },
+    "name": {
+        "types": ["string"],
+        "nullable": False,
+        "description": "Metric name.",
+    },
+    "value": {
+        "types": ["integer", "number", "null"],
+        "nullable": True,
+        "description": "Counter or gauge value.",
+    },
+    "count": {
+        "types": ["integer", "null"],
+        "nullable": True,
+        "description": "Histogram sample count.",
+    },
+    "sum": {
+        "types": ["integer", "number", "null"],
+        "nullable": True,
+        "description": "Histogram sample sum.",
+    },
+    "avg": {
+        "types": ["integer", "number", "null"],
+        "nullable": True,
+        "description": "Histogram sample average.",
+    },
+}
 
 
 class MetricsCollector:
     def __init__(self):
-        self._lock = Lock()
+        self._lock = RLock()
         self._counters: Dict[str, int] = defaultdict(int)
         self._gauges: Dict[str, float] = {}
         self._histograms: Dict[str, List[float]] = defaultdict(list)
@@ -43,9 +80,67 @@ class MetricsCollector:
             return {
                 "counters": dict(self._counters),
                 "gauges": dict(self._gauges),
-                "histograms": {k: {"count": len(v), "sum": sum(v), "avg": sum(v) / len(v) if v else 0}
-                               for k, v in self._histograms.items()},
+                "histograms": {
+                    k: {
+                        "count": len(v),
+                        "sum": sum(v),
+                        "avg": sum(v) / len(v) if v else 0,
+                    }
+                    for k, v in self._histograms.items()
+                },
             }
+
+    def export_snapshot(
+        self,
+        data_path: Path,
+        *,
+        generated_at: str = None,
+    ) -> Dict[str, Any]:
+        return write_dataset_export(
+            self._snapshot_records(),
+            data_path,
+            field_dictionary=METRIC_EXPORT_FIELDS,
+            generated_at=generated_at,
+        )
+
+    def _snapshot_records(self) -> List[Dict[str, Any]]:
+        snapshot = self.snapshot()
+        records: List[Dict[str, Any]] = []
+
+        for name, value in snapshot["counters"].items():
+            records.append(
+                {
+                    "metric_type": "counter",
+                    "name": name,
+                    "value": value,
+                    "count": None,
+                    "sum": None,
+                    "avg": None,
+                }
+            )
+        for name, value in snapshot["gauges"].items():
+            records.append(
+                {
+                    "metric_type": "gauge",
+                    "name": name,
+                    "value": value,
+                    "count": None,
+                    "sum": None,
+                    "avg": None,
+                }
+            )
+        for name, value in snapshot["histograms"].items():
+            records.append(
+                {
+                    "metric_type": "histogram",
+                    "name": name,
+                    "value": None,
+                    "count": value["count"],
+                    "sum": value["sum"],
+                    "avg": value["avg"],
+                }
+            )
+        return records
 
 
 metrics = MetricsCollector()
