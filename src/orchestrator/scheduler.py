@@ -1,9 +1,10 @@
 """Task Scheduler — Priority-based task queuing and dispatch."""
 
-import asyncio
 import heapq
+import json
 import time
-from typing import Any, Dict, Optional
+from copy import deepcopy
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
 
@@ -35,9 +36,16 @@ class TaskScheduler:
         self._queues: Dict[str, PriorityQueue] = {}
         self._scheduled: Dict[str, float] = {}
         self._in_flight: Dict[str, Dict] = {}
+        self._legacy_ids: Dict[str, str] = {}
+        self._queue_audit: List[Dict[str, Any]] = []
         self._max_retries = 3
 
-    def enqueue(self, task: Dict, queue: str = "default", priority: int = 0) -> str:
+    def enqueue(
+        self,
+        task: Dict,
+        queue: str = "default",
+        priority: int = 0,
+    ) -> str:
         task_id = str(uuid4())
         task["id"] = task_id
         task["enqueued_at"] = time.time()
@@ -48,13 +56,51 @@ class TaskScheduler:
         self._queues[queue].push(task, priority)
         return task_id
 
-    def schedule(self, task: Dict, delay: float, queue: str = "default", priority: int = 0) -> str:
+    def enqueue_legacy_record(
+        self,
+        record: Any,
+        queue: str = "default",
+        priority: int = 0,
+    ) -> Optional[str]:
+        decoded, reason, legacy_id = self._decode_legacy_record(record)
+        if decoded is None:
+            self._record_queue_audit(
+                action="legacy_record_rejected",
+                legacy_id=legacy_id,
+                reason=reason,
+            )
+            return None
+
+        if legacy_id in self._legacy_ids:
+            self._record_queue_audit(
+                action="legacy_record_deduplicated",
+                legacy_id=legacy_id,
+                reason="legacy record already enqueued",
+            )
+            return self._legacy_ids[legacy_id]
+
+        decoded["legacy_id"] = legacy_id
+        task_id = self.enqueue(decoded, queue=queue, priority=priority)
+        self._legacy_ids[legacy_id] = task_id
+        return task_id
+
+    def schedule(
+        self,
+        task: Dict,
+        delay: float,
+        queue: str = "default",
+        priority: int = 0,
+    ) -> str:
         task_id = str(uuid4())
         task["id"] = task_id
         self._scheduled[task_id] = time.time() + delay
         return task_id
 
-    async def dequeue(self, queue: str = "default", timeout: float = 1.0) -> Optional[Dict]:
+    async def dequeue(
+        self,
+        queue: str = "default",
+        timeout: float = 1.0,
+    ) -> Optional[Dict]:
         now = time.time()
         expired = [tid for tid, t in self._scheduled.items() if t <= now]
         for tid in expired:
@@ -69,6 +115,9 @@ class TaskScheduler:
                 return task
         return None
 
+    def queue_audit(self) -> List[Dict[str, Any]]:
+        return deepcopy(self._queue_audit)
+
     def complete(self, task_id: str) -> bool:
         return self._in_flight.pop(task_id, None) is not None
 
@@ -80,6 +129,54 @@ class TaskScheduler:
                 self.enqueue(task, queue, priority=task.get("priority", 0))
                 return True
         return False
+
+    def _decode_legacy_record(
+        self,
+        record: Any,
+    ) -> Tuple[Optional[Dict], str, str]:
+        try:
+            if isinstance(record, bytes):
+                record = record.decode("utf-8")
+            if isinstance(record, str):
+                record = json.loads(record)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return None, "legacy record is not valid json", "unknown"
+
+        if not isinstance(record, dict):
+            return None, "legacy record must be an object", "unknown"
+
+        legacy_id = str(
+            record.get("legacy_id")
+            or record.get("job_id")
+            or record.get("id")
+            or "unknown"
+        )
+        if legacy_id == "unknown":
+            return None, "legacy record is missing an id", legacy_id
+
+        payload = record.get("payload", record.get("task"))
+        if not isinstance(payload, dict):
+            return None, "legacy record payload must be an object", legacy_id
+        if not isinstance(payload.get("type"), str) or not payload["type"]:
+            return None, "legacy payload is missing task type", legacy_id
+
+        return deepcopy(payload), "", legacy_id
+
+    def _record_queue_audit(
+        self,
+        *,
+        action: str,
+        legacy_id: str,
+        reason: str,
+    ) -> None:
+        self._queue_audit.append(
+            {
+                "action": action,
+                "legacy_id": legacy_id,
+                "reason": reason,
+                "recorded_at": time.time(),
+            }
+        )
 
 # 2019-04-25T08:37:12 update
 
