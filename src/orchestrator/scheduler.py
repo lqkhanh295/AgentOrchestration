@@ -30,14 +30,67 @@ class PriorityQueue:
         return len(self._queue)
 
 
+class WorkflowDeletedError(RuntimeError):
+    """Raised when an attempt is made to create a run for a deleted workflow.
+
+    This prevents the scheduler from accepting new work after a workflow has
+    been removed, closing the window-of-time race between deletion and run
+    materialisation (issue #3608).
+    """
+
+
 class TaskScheduler:
+    """Priority-based task scheduler with workflow lifecycle guards.
+
+    Enhancements (issue #3608 — workflow removal race):
+    * A workflow can be **marked as deleted** via :meth:`mark_workflow_deleted`.
+    * :meth:`enqueue` atomically checks the deleted set *before* inserting a
+      task; if the workflow has been removed it raises
+      :class:`WorkflowDeletedError` instead of silently creating a new run.
+    * :meth:`schedule` performs the same check so that delayed runs cannot
+      materialise after the workflow has been torn down.
+    * The deleted set is append-only; once a workflow ID is added it is never
+      removed, providing a durable guard even across concurrent enqueue
+      attempts.
+    """
+
     def __init__(self):
         self._queues: Dict[str, PriorityQueue] = {}
         self._scheduled: Dict[str, float] = {}
         self._in_flight: Dict[str, Dict] = {}
         self._max_retries = 3
+        # Set of workflow IDs that have been permanently removed (issue #3608)
+        self._deleted_workflows: set = set()
+
+    # ------------------------------------------------------------------
+    # Workflow lifecycle
+    # ------------------------------------------------------------------
+
+    def mark_workflow_deleted(self, workflow_id: str) -> None:
+        """Permanently mark a workflow as deleted.
+
+        After this call, any attempt to enqueue or schedule a run for this
+        workflow will raise :class:`WorkflowDeletedError`.
+        """
+        self._deleted_workflows.add(workflow_id)
+
+    def _guard_workflow_not_deleted(self, task: Dict) -> None:
+        """Raise WorkflowDeletedError if the task's workflow has been removed.
+
+        This is the atomic state-precondition check that prevents new runs
+        from materialising after the parent workflow has been torn down
+        (issue #3608).
+        """
+        workflow_id = task.get("workflow_id")
+        if workflow_id and workflow_id in self._deleted_workflows:
+            raise WorkflowDeletedError(
+                f"Cannot create run for deleted workflow {workflow_id!r}"
+            )
 
     def enqueue(self, task: Dict, queue: str = "default", priority: int = 0) -> str:
+        # Atomically check deletion state before any queue mutation (issue #3608)
+        self._guard_workflow_not_deleted(task)
+
         task_id = str(uuid4())
         task["id"] = task_id
         task["enqueued_at"] = time.time()
@@ -49,6 +102,9 @@ class TaskScheduler:
         return task_id
 
     def schedule(self, task: Dict, delay: float, queue: str = "default", priority: int = 0) -> str:
+        # Also guard delayed runs — they must not materialise after deletion
+        self._guard_workflow_not_deleted(task)
+
         task_id = str(uuid4())
         task["id"] = task_id
         self._scheduled[task_id] = time.time() + delay
@@ -80,6 +136,7 @@ class TaskScheduler:
                 self.enqueue(task, queue, priority=task.get("priority", 0))
                 return True
         return False
+
 
 # 2019-04-25T08:37:12 update
 

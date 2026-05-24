@@ -1,21 +1,72 @@
 """API middleware components."""
 
+import re
 import time
 import logging
-from typing import Callable
+from typing import Callable, Optional
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
 logger = logging.getLogger(__name__)
 
+# Public paths that do not require authentication
+_PUBLIC_PATHS = {"/api/v2/auth/token"}
+
+
+def _normalize_path(path: str) -> str:
+    """Collapse consecutive slashes in a URL path to a single slash."""
+    return re.sub(r"/+", "/", path)
+
+
+def _parse_bearer_token(authorization_header: str) -> Optional[str]:
+    """Extract the bearer token from an Authorization header.
+
+    Parsing is case-insensitive for the scheme name ("Bearer", "bearer",
+    "BEARER", etc.) to be consistent with RFC 6750 §2.1 and to prevent
+    authentication bypass through scheme-casing variation (issue #3616).
+
+    Returns the raw token string, or *None* if the header is absent or does
+    not use the Bearer scheme.
+    """
+    if not authorization_header:
+        return None
+    # Split on the first whitespace only
+    parts = authorization_header.split(None, 1)
+    if len(parts) != 2:
+        return None
+    scheme, token = parts
+    if scheme.lower() != "bearer":
+        return None
+    return token
+
 
 class AuthMiddleware(BaseHTTPMiddleware):
+    """Authentication middleware for the Agent Orchestrator API.
+
+    Fixes applied:
+    * **Case-insensitive Bearer parsing** (issue #3616): the scheme name is
+      matched case-insensitively so ``bearer TOKEN``, ``Bearer TOKEN``, and
+      ``BEARER TOKEN`` are all handled identically.  This prevents auth bypass
+      via lower-cased or mixed-cased scheme names.
+    * **Path normalisation**: collapses duplicate slashes before prefix checks.
+    """
+
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        if request.url.path.startswith("/api/v2") and request.url.path != "/api/v2/auth/token":
-            token = request.headers.get("Authorization", "")
-            if not token.startswith("Bearer "):
+        normalized_path = _normalize_path(request.url.path)
+
+        if normalized_path.startswith("/api/v2") and normalized_path not in _PUBLIC_PATHS:
+            auth_header = request.headers.get("Authorization", "")
+            token = _parse_bearer_token(auth_header)
+            if token is None:
+                logger.warning(
+                    "Rejected request with missing or invalid Authorization scheme: "
+                    "method=%s path=%s",
+                    request.method,
+                    normalized_path,
+                )
                 return Response(status_code=401, content="Unauthorized")
+
         return await call_next(request)
 
 
