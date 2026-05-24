@@ -3,9 +3,10 @@
 import asyncio
 import logging
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List
 
 from src.agent import AgentRegistry, AgentStatus
+from src.orchestrator.reducer_errors import TaskLifecycleReducer
 from src.orchestrator.scheduler import TaskScheduler
 
 logger = logging.getLogger(__name__)
@@ -15,6 +16,7 @@ class OrchestrationEngine:
     def __init__(self, max_workers: int = 10, agent_timeout: int = 300):
         self.registry = AgentRegistry()
         self.scheduler = TaskScheduler()
+        self.task_reducer = TaskLifecycleReducer()
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
         self.agent_timeout = agent_timeout
         self._running = False
@@ -47,6 +49,10 @@ class OrchestrationEngine:
         agent_id = task["target_agent"]
         logger.info(f"Executing task {task_id} on agent {agent_id}")
 
+        if not self.task_reducer.reduce(task, "running", reason="dispatch"):
+            logger.warning("Rejected task %s dispatch transition", task_id)
+            return
+
         for hook in self._hooks["pre_execute"]:
             await hook(task)
 
@@ -60,6 +66,16 @@ class OrchestrationEngine:
                 self._run_agent_task(agent, task),
                 timeout=self.agent_timeout,
             )
+            if not self.task_reducer.reduce(
+                task,
+                "completed",
+                reason="agent task completed",
+            ):
+                logger.warning(
+                    "Rejected task %s completion transition",
+                    task_id,
+                )
+                return
             self.registry.update_status(agent_id, AgentStatus.PAUSED)
 
             for hook in self._hooks["post_execute"]:
@@ -68,9 +84,17 @@ class OrchestrationEngine:
             logger.info(f"Task {task_id} completed successfully")
 
         except Exception as e:
+            self.task_reducer.reduce(
+                task,
+                "failed",
+                reason=type(e).__name__,
+            )
             logger.error(f"Task {task_id} failed: {e}")
             for hook in self._hooks["on_error"]:
                 await hook(task, e)
+
+    def get_reducer_errors(self) -> List[Dict[str, Any]]:
+        return self.task_reducer.errors()
 
     async def _run_agent_task(self, agent: Dict, task: Dict) -> Any:
         loop = asyncio.get_event_loop()
@@ -82,7 +106,10 @@ class OrchestrationEngine:
         )
 
     def _execute_in_thread(self, agent: Dict, task: Dict) -> Any:
-        return {"status": "completed", "output": f"Task {task['id']} processed by {agent['name']}"}
+        return {
+            "status": "completed",
+            "output": f"Task {task['id']} processed by {agent['name']}",
+        }
 
 # 2019-04-24T14:55:39 update
 
