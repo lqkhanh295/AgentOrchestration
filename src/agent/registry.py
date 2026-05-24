@@ -1,10 +1,10 @@
 """Agent Registry — Manages agent lifecycle and metadata."""
 
-import json
+from copy import deepcopy
 import time
 import uuid
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 class AgentStatus(Enum):
@@ -21,8 +21,16 @@ class AgentRegistry:
         self.storage_backend = storage_backend
         self._agents: Dict[str, Dict[str, Any]] = {}
         self._index: Dict[str, List[str]] = {}
+        self._auth_versions: Dict[str, int] = {}
+        self._resolution_cache: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+        self._authorization_audit: List[Dict[str, Any]] = []
 
-    def register(self, name: str, agent_type: str, config: Optional[Dict] = None) -> str:
+    def register(
+        self,
+        name: str,
+        agent_type: str,
+        config: Optional[Dict] = None,
+    ) -> str:
         agent_id = str(uuid.uuid4())
         timestamp = time.time()
         self._agents[agent_id] = {
@@ -36,6 +44,7 @@ class AgentRegistry:
             "version": "1.0.0",
             "metrics": {"tasks_completed": 0, "errors": 0, "uptime": 0},
         }
+        self._auth_versions[agent_id] = 0
         group = agent_type.split(".")[0]
         if group not in self._index:
             self._index[group] = []
@@ -45,7 +54,11 @@ class AgentRegistry:
     def get(self, agent_id: str) -> Optional[Dict[str, Any]]:
         return self._agents.get(agent_id)
 
-    def list(self, status: Optional[AgentStatus] = None, group: Optional[str] = None) -> List[Dict[str, Any]]:
+    def list(
+        self,
+        status: Optional[AgentStatus] = None,
+        group: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         agents = self._agents.values()
         if status:
             agents = [a for a in agents if a["status"] == status.value]
@@ -61,6 +74,77 @@ class AgentRegistry:
         self._agents[agent_id]["updated_at"] = time.time()
         return True
 
+    def set_permissions(
+        self,
+        agent_id: str,
+        permissions: Dict[str, List[str]],
+    ) -> bool:
+        if agent_id not in self._agents:
+            return False
+        self._agents[agent_id]["config"]["permissions"] = deepcopy(permissions)
+        self._auth_versions[agent_id] = (
+            self._auth_versions.get(agent_id, 0) + 1
+        )
+        self._invalidate_resolution_cache(agent_id)
+        self._record_authorization_audit(
+            agent_id=agent_id,
+            principal="system",
+            permission="permissions:update",
+            action="permissions_updated",
+            reason="authorization policy changed",
+        )
+        return True
+
+    def resolve(
+        self,
+        agent_id: str,
+        principal: str = "",
+        permission: str = "execute",
+    ) -> Optional[Dict[str, Any]]:
+        cache_key = (agent_id, principal, permission)
+        current_version = self._auth_versions.get(agent_id, 0)
+        cached = self._resolution_cache.get(cache_key)
+        if cached:
+            agent = self._agents.get(agent_id)
+            cache_is_current = cached["auth_version"] == current_version
+            if (
+                agent
+                and cache_is_current
+                and self._is_authorized(agent, principal, permission)
+            ):
+                return deepcopy(cached["agent"])
+            self._resolution_cache.pop(cache_key, None)
+            self._record_authorization_audit(
+                agent_id=agent_id,
+                principal=principal,
+                permission=permission,
+                action="cached_resolution_rejected",
+                reason="authorization changed or no longer allows access",
+            )
+
+        agent = self._agents.get(agent_id)
+        if not agent:
+            return None
+        if not self._is_authorized(agent, principal, permission):
+            self._record_authorization_audit(
+                agent_id=agent_id,
+                principal=principal,
+                permission=permission,
+                action="authorization_denied",
+                reason="principal lacks requested permission",
+            )
+            return None
+
+        resolved = deepcopy(agent)
+        self._resolution_cache[cache_key] = {
+            "agent": resolved,
+            "auth_version": current_version,
+        }
+        return deepcopy(resolved)
+
+    def authorization_audit(self) -> List[Dict[str, Any]]:
+        return deepcopy(self._authorization_audit)
+
     def delete(self, agent_id: str) -> bool:
         if agent_id not in self._agents:
             return False
@@ -68,10 +152,56 @@ class AgentRegistry:
         group = agent["type"].split(".")[0]
         if group in self._index and agent_id in self._index[group]:
             self._index[group].remove(agent_id)
+        self._auth_versions.pop(agent_id, None)
+        self._invalidate_resolution_cache(agent_id)
         return True
 
     def count(self) -> int:
         return len(self._agents)
+
+    def _invalidate_resolution_cache(self, agent_id: str) -> None:
+        stale_keys = [
+            cache_key
+            for cache_key in self._resolution_cache
+            if cache_key[0] == agent_id
+        ]
+        for cache_key in stale_keys:
+            self._resolution_cache.pop(cache_key, None)
+
+    def _is_authorized(
+        self,
+        agent: Dict[str, Any],
+        principal: str,
+        permission: str,
+    ) -> bool:
+        if not principal:
+            return True
+        permissions = agent.get("config", {}).get("permissions")
+        if not permissions:
+            return True
+        allowed = permissions.get(principal, [])
+        return "*" in allowed or permission in allowed
+
+    def _record_authorization_audit(
+        self,
+        *,
+        agent_id: str,
+        principal: str,
+        permission: str,
+        action: str,
+        reason: str,
+    ) -> None:
+        self._authorization_audit.append(
+            {
+                "agent_id": agent_id,
+                "principal": principal,
+                "permission": permission,
+                "action": action,
+                "reason": reason,
+                "auth_version": self._auth_versions.get(agent_id, 0),
+                "recorded_at": time.time(),
+            }
+        )
 
 # 2019-01-29T11:24:49 update
 
