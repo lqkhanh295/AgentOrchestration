@@ -1,21 +1,113 @@
 """API middleware components."""
 
+import base64
+import json
+import re
 import time
 import logging
-from typing import Callable
+from typing import Callable, Optional
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
 logger = logging.getLogger(__name__)
 
+# Public paths that do not require authentication
+_PUBLIC_PATHS = {"/api/v2/auth/token"}
+
+
+def _normalize_path(path: str) -> str:
+    """Collapse consecutive slashes in a URL path to a single slash.
+
+    This prevents authentication bypass via paths like ``//api/v2/secure``
+    that would not match the ``startswith("/api/v2")`` check.
+    """
+    return re.sub(r"/+", "/", path)
+
+
+def _decode_jwt_payload(token: str) -> Optional[dict]:
+    """Decode the payload of a JWT without signature verification.
+
+    Returns the parsed claims dict, or *None* if the token is malformed.
+    This function is intentionally used only for reading standard claims
+    (e.g. ``nbf``); full signature verification is expected to be
+    performed by the downstream auth service.
+    """
+    try:
+        parts = token.split(".")
+        if len(parts) != 3:
+            return None
+        # JWT base64url encoding requires padding to be added back
+        payload_b64 = parts[1] + "=" * (-len(parts[1]) % 4)
+        payload_bytes = base64.urlsafe_b64decode(payload_b64)
+        return json.loads(payload_bytes.decode("utf-8"))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _check_token_nbf(token: str) -> bool:
+    """Return True when the token's not-before (``nbf``) claim is satisfied.
+
+    A token that carries an ``nbf`` claim with a value *in the future* is
+    not yet valid and must be rejected for worker requests.  Tokens that
+    omit the ``nbf`` claim pass this check (the claim is optional per
+    RFC 7519 §4.1.5).
+    """
+    payload = _decode_jwt_payload(token)
+    if payload is None:
+        # Malformed token — let downstream validation handle it; do not block
+        # here because we cannot decode the claims at all.
+        return True
+    nbf = payload.get("nbf")
+    if nbf is None:
+        return True  # No nbf claim — allowed
+    return time.time() >= float(nbf)
+
 
 class AuthMiddleware(BaseHTTPMiddleware):
+    """Authentication middleware for the Agent Orchestrator API.
+
+    Enhancements over the baseline implementation:
+
+    * **Path normalisation** – collapses duplicate slashes *before* the
+      ``/api/v2`` prefix check so that ``//api/v2/secure`` is correctly
+      treated as a protected path (fixes the path-middleware bypass).
+    * **Token not-before (nbf) enforcement** – rejects Bearer tokens whose
+      ``nbf`` claim lies in the future, preventing stale or pre-issued
+      credentials from being used on worker requests (fixes the worker-auth
+      gap described in issue #3596).
+    """
+
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        if request.url.path.startswith("/api/v2") and request.url.path != "/api/v2/auth/token":
-            token = request.headers.get("Authorization", "")
-            if not token.startswith("Bearer "):
+        # Normalise the path so that ``//api/v2/…`` is treated the same as
+        # ``/api/v2/…`` and cannot bypass prefix-based auth checks.
+        normalized_path = _normalize_path(request.url.path)
+
+        if normalized_path.startswith("/api/v2") and normalized_path not in _PUBLIC_PATHS:
+            token_header = request.headers.get("Authorization", "")
+            if not token_header.startswith("Bearer "):
+                logger.warning(
+                    "Rejected unauthenticated request: method=%s path=%s",
+                    request.method,
+                    normalized_path,
+                )
                 return Response(status_code=401, content="Unauthorized")
+
+            bearer_token = token_header[len("Bearer "):]
+
+            # Enforce the not-before claim on worker requests so that
+            # pre-issued tokens cannot be used before their valid period.
+            if not _check_token_nbf(bearer_token):
+                logger.warning(
+                    "Rejected token with future nbf claim: method=%s path=%s",
+                    request.method,
+                    normalized_path,
+                )
+                return Response(
+                    status_code=401,
+                    content="Token not yet valid (nbf claim is in the future)",
+                )
+
         return await call_next(request)
 
 
