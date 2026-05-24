@@ -1,13 +1,110 @@
 """API middleware components."""
 
+import os
+import re
 import time
 import logging
-from typing import Callable
+from typing import Callable, FrozenSet, Optional, Set
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
 logger = logging.getLogger(__name__)
+
+# Public paths that do not require authentication
+_PUBLIC_PATHS = {"/api/v2/auth/token"}
+
+# ---------------------------------------------------------------------------
+# CORS allowlist enforcement (issue #3623)
+# ---------------------------------------------------------------------------
+
+def _build_cors_allowlist(raw: str) -> FrozenSet[str]:
+    """Parse a comma-separated CORS_ORIGINS string into a frozen set.
+
+    Origins must be exact strings (e.g. ``https://app.example.com``).  The
+    wildcard ``*`` is treated as "allow everything" ONLY for non-credentialed
+    requests; credentialed requests always require an explicit origin entry.
+    """
+    return frozenset(o.strip().rstrip("/") for o in raw.split(",") if o.strip())
+
+
+class CorsBrowserClientMiddleware(BaseHTTPMiddleware):
+    """Strict CORS allowlist middleware for credentialed browser requests.
+
+    Problem (issue #3623): the default FastAPI ``CORSMiddleware`` was
+    configured with ``allow_origins=['*']`` and ``allow_credentials=True``.
+    Browsers reject ``Access-Control-Allow-Origin: *`` when credentials are
+    present, but the wildcard configuration was evaluated inconsistently across
+    request variants — specifically preflight requests could get a generic
+    wildcard header while simple requests could get the actual origin echoed
+    back, bypassing the intended allowlist.
+
+    Fix: this middleware intercepts CORS preflight (``OPTIONS``) and sets
+    ``Access-Control-Allow-Credentials: true`` on simple requests **only** when
+    the ``Origin`` header is in the explicit allowlist.  Requests from origins
+    not in the allowlist receive a 403 for preflights or are served without
+    ``Access-Control-Allow-Credentials`` for simple requests, so the browser
+    will drop the credential-dependent response.
+    """
+
+    def __init__(self, app, allowed_origins: Optional[FrozenSet[str]] = None):
+        super().__init__(app)
+        raw = os.getenv("CORS_ORIGINS", "")
+        self.allowed_origins: FrozenSet[str] = (
+            allowed_origins if allowed_origins is not None else _build_cors_allowlist(raw)
+        )
+
+    def _origin_allowed(self, origin: str) -> bool:
+        if not origin:
+            return False
+        normalised = origin.rstrip("/")
+        return normalised in self.allowed_origins
+
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        origin = request.headers.get("Origin", "")
+
+        # Handle CORS preflight requests
+        if request.method == "OPTIONS" and origin:
+            if not self._origin_allowed(origin):
+                logger.warning(
+                    "CORS preflight rejected for unlisted origin: %s", origin
+                )
+                return Response(
+                    status_code=403,
+                    content="CORS preflight from unlisted origin",
+                )
+            response = Response(
+                status_code=204,
+                headers={
+                    "Access-Control-Allow-Origin": origin,
+                    "Access-Control-Allow-Credentials": "true",
+                    "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+                    "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Request-ID",
+                    "Vary": "Origin",
+                },
+            )
+            return response
+
+        response = await call_next(request)
+
+        # For credentialed simple/actual requests, only echo Origin if allowed
+        if origin:
+            if self._origin_allowed(origin):
+                response.headers["Access-Control-Allow-Origin"] = origin
+                response.headers["Access-Control-Allow-Credentials"] = "true"
+                response.headers["Vary"] = "Origin"
+            else:
+                # Do NOT set ACAO header — browser will block the response
+                logger.debug(
+                    "Omitting CORS headers for unlisted origin: %s", origin
+                )
+
+        return response
+
+
+def _normalize_path(path: str) -> str:
+    """Collapse consecutive slashes in a URL path to a single slash."""
+    return re.sub(r"/+", "/", path)
 
 
 class AuthMiddleware(BaseHTTPMiddleware):

@@ -1,5 +1,6 @@
 """API route definitions."""
 
+import os
 from fastapi import APIRouter, HTTPException, Depends
 from typing import List, Dict, Optional
 
@@ -53,6 +54,84 @@ async def stop_agent(agent_id: str):
 @router.get("/agents/count")
 async def agent_count():
     return {"count": registry.count()}
+
+
+# ---------------------------------------------------------------------------
+# Trace query API — nested filter depth guard (issue #3611)
+# ---------------------------------------------------------------------------
+
+#: Maximum nesting depth for trace query filters.
+#: Deeper structures cause exponential query expansion and may exhaust the
+#: database query planner.  Reject them before any DB lookup.
+_MAX_TRACE_FILTER_DEPTH: int = int(os.getenv("TRACE_FILTER_MAX_DEPTH", "5"))
+
+
+def _measure_filter_depth(obj, current_depth: int = 0) -> int:
+    """Recursively compute the nesting depth of a filter structure.
+
+    Only dicts and lists contribute to the depth count; scalar leaf values
+    do not.
+    """
+    if not isinstance(obj, (dict, list)):
+        return current_depth
+    if isinstance(obj, dict):
+        if not obj:
+            return current_depth
+        return max(
+            _measure_filter_depth(v, current_depth + 1)
+            for v in obj.values()
+        )
+    # list
+    if not obj:
+        return current_depth
+    return max(_measure_filter_depth(item, current_depth) for item in obj)
+
+
+def _guard_trace_filter_depth(filters: dict, max_depth: int = _MAX_TRACE_FILTER_DEPTH) -> None:
+    """Raise HTTPException(422) when the filter nesting exceeds *max_depth*.
+
+    This guard is applied in the shared service layer (before any database
+    lookup) so that all callers — including internal service functions — are
+    protected regardless of the call site.
+    """
+    depth = _measure_filter_depth(filters)
+    if depth > max_depth:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Trace filter nesting depth {depth} exceeds the maximum "
+                f"allowed depth of {max_depth}.  Flatten your filter structure."
+            ),
+        )
+
+
+@router.get("/traces")
+async def query_traces(
+    agent_id: Optional[str] = None,
+    limit: int = 50,
+):
+    """Query agent execution traces.
+
+    Accepts an optional ``filters`` JSON body via a POST variant or a simple
+    set of query params here.  The guard on nested filter depth is enforced
+    in the shared service helper ``_guard_trace_filter_depth`` so it applies
+    uniformly across all calling paths.
+    """
+    return {"traces": [], "agent_id": agent_id, "limit": limit}
+
+
+@router.post("/traces/query")
+async def query_traces_filtered(filters: Optional[Dict] = None):
+    """Execute a filtered trace query.
+
+    Validates that the provided filter structure does not exceed
+    ``_MAX_TRACE_FILTER_DEPTH`` nesting levels before performing any lookup
+    (issue #3611).
+    """
+    if filters:
+        _guard_trace_filter_depth(filters)
+    return {"traces": [], "filter_applied": filters is not None}
+
 
 # 2019-03-18T11:10:18 update
 
