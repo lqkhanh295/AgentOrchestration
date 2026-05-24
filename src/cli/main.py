@@ -2,9 +2,48 @@
 
 import argparse
 import sys
+import json
 
 from src.common.config import Config
 from src.common.logging import configure_logging
+from src.sdk.client import OrchestratorClient
+
+
+def handle_init(args) -> int:
+    print(f"Initializing project: {args.name}")
+    return 0
+
+
+def handle_deploy(args) -> int:
+    print(f"Deploying agent from manifest: {args.manifest}")
+    try:
+        with open(args.manifest, "r") as f:
+            manifest = json.load(f)
+    except Exception as e:
+        print(f"Failed to read manifest: {e}")
+        return 1
+
+    client = OrchestratorClient()
+    name = manifest.get("name", "unknown")
+    agent_type = manifest.get("agent_type", "unknown")
+    config = manifest.get("config", {})
+
+    result = client.register_agent(name, agent_type, config)
+    if "error" in result:
+        print(f"Error deploying agent: {result.get('message', result['error'])}")
+        return 1
+
+    return 0
+
+
+def handle_status(args) -> int:
+    print("Checking agent status...")
+    return 0
+
+
+def handle_logs(args) -> int:
+    print(f"Fetching logs for agent: {args.agent_id}")
+    return 0
 
 
 def cli():
@@ -34,18 +73,18 @@ def cli():
     else:
         configure_logging("INFO")
 
-    if args.command == "init":
-        print(f"Initializing project: {args.name}")
-    elif args.command == "deploy":
-        print(f"Deploying agent from manifest: {args.manifest}")
-    elif args.command == "status":
-        print("Checking agent status...")
-    elif args.command == "logs":
-        print(f"Fetching logs for agent: {args.agent_id}")
+    handlers = {
+        "init": handle_init,
+        "deploy": handle_deploy,
+        "status": handle_status,
+        "logs": handle_logs,
+    }
+
+    if args.command in handlers:
+        sys.exit(handlers[args.command](args))
     else:
         parser.print_help()
         sys.exit(1)
-
 
 if __name__ == "__main__":
     cli()
