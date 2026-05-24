@@ -27,3 +27,20 @@ jobs:
         run: uv run pytest --cov=src tests/
       - name: Lint
         run: uv run flake8 src/ tests/
+
+  docker-inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build runtime image
+        run: docker build -t ao-runtime -f infra/Dockerfile .
+      - name: Verify no package manager caches
+        run: |
+          echo "Checking for package manager cache directories..."
+          if docker run --rm ao-runtime sh -c "test -d /var/lib/apt/lists && [ \"\$(ls -A /var/lib/apt/lists)\" ]"; then echo 'FOUND: apt lists'; exit 1; fi
+          if docker run --rm ao-runtime sh -c "test -d /root/.cache && [ \"\$(ls -A /root/.cache)\" ]"; then echo 'FOUND: pip cache'; exit 1; fi
+          if docker run --rm ao-runtime sh -c "test -d /var/cache/apt && [ \"\$(ls -A /var/cache/apt)\" ]"; then echo 'FOUND: apt cache'; exit 1; fi
+          echo "✓ No package manager caches found in runtime image"
+      - name: Report image size
+        run: |
+          echo "Runtime image size: \$(docker images --format '{{.Size}}' ao-runtime)"
